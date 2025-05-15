@@ -45,6 +45,58 @@ def get_safe_value(data_structure, keys, default=None):
                 return data_structure[key]
     return default
 
+# --- Function to load ticker and company name data (MODIFIED) ---
+@st.cache_data
+def load_ticker_data(file_path="NASDAQ_NYSE_tickers.csv"):
+    """
+    Loads ticker and company name data from a CSV file.
+    Assumes CSV has 'Symbol' and 'Security Name' (or similar) columns,
+    and attempts to infer space/tab delimiter.
+    """
+    try:
+        # Attempt to read with space/tab delimiter inference
+        # delim_whitespace=True handles one or more spaces as delimiter.
+        # If it's specifically tabs, sep='\t' would be more precise.
+        df = pd.read_csv(file_path, delim_whitespace=True) 
+        
+        # Identify actual column names (robustly)
+        # We expect something like 'Symbol' for the ticker
+        # and 'Security' (followed by 'Name' or similar) for the company name.
+        
+        symbol_col = None
+        name_col = None
+
+        for col in df.columns:
+            if str(col).strip().upper() == 'SYMBOL':
+                symbol_col = col
+            # Check if 'SECURITY' is the start of the column name for company name
+            elif str(col).strip().upper().startswith('SECURITY'): 
+                name_col = col
+        
+        if not symbol_col or not name_col:
+            st.sidebar.error(f"Ticker file '{file_path}' must contain a 'Symbol' column and a column starting with 'Security' (e.g., 'Security Name'). Found columns: {df.columns.tolist()}")
+            return pd.DataFrame()
+
+        # Create a new DataFrame with just the essential columns and standard names
+        # Use .copy() to avoid SettingWithCopyWarning
+        clean_df = df[[symbol_col, name_col]].copy()
+        clean_df.rename(columns={symbol_col: 'Symbol', name_col: 'Name'}, inplace=True)
+        
+        clean_df.dropna(subset=['Symbol', 'Name'], inplace=True)
+        clean_df['Symbol'] = clean_df['Symbol'].astype(str).str.upper().str.strip()
+        clean_df['Name'] = clean_df['Name'].astype(str).str.strip()
+        # Optional: Filter out symbols with invalid characters if necessary
+        clean_df = clean_df[~clean_df['Symbol'].str.contains(r'[$.^/\\]', na=False)] # yfinance doesn't like some chars, added backslash for regex
+        return clean_df
+        
+    except FileNotFoundError:
+        st.sidebar.warning(f"Ticker list file ('{file_path}') not found. Name search and ticker suggestions will be unavailable.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.sidebar.error(f"Error loading ticker file '{file_path}': {e}")
+        st.sidebar.info("Please ensure the CSV is correctly formatted (e.g., space or tab-separated) with 'Symbol' and 'Security Name' (or similar) columns.")
+        return pd.DataFrame()
+
 # --- AI Summary Function (Google Gemini - Updated from gemini_summary_prompt_fix) ---
 def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
     """
@@ -57,7 +109,7 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
             return "Error: Google API key not found in Streamlit secrets. Please add `GOOGLE_API_KEY = \"YOUR_KEY\"` to `.streamlit/secrets.toml`."
 
         genai.configure(api_key=api_key)
-        model_name = 'gemini-1.5-flash-latest' # Or 'gemini-1.0-pro-latest'
+        model_name = 'gemini-1.5-flash-latest' 
         model = genai.GenerativeModel(model_name)
 
         company_name = get_safe_value(stock_info_dict, 'shortName', 'the company')
@@ -66,7 +118,6 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
         ratios_text_list = []
         if latest_ratios_series is not None and not latest_ratios_series.empty:
             for ratio_name, value in latest_ratios_series.dropna().items():
-                # Using your existing format_value logic for consistency
                 if "Margin" in ratio_name or "ROE" in ratio_name or "ROA" in ratio_name:
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'percent')}")
                 elif "EPS" in ratio_name: 
@@ -75,7 +126,6 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'ratio')}")
         ratios_as_text = "\n".join(ratios_text_list) if ratios_text_list else "No detailed financial ratio data was provided for this period."
 
-        # Revised Prompt Structure:
         prompt = f"""
         You are a concise financial analyst assistant.
         Your task is to analyze the provided data for {company_name} (Sector: {sector}).
@@ -107,13 +157,12 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
         """
 
         generation_config = genai.types.GenerationConfig(
-            temperature=0.2, # Slightly lower temperature for more focused output
+            temperature=0.2, 
             max_output_tokens=350 
         )
         response = model.generate_content(prompt, generation_config=generation_config)
         
         summary = ""
-        # Robustly extract text from response
         if hasattr(response, 'text') and response.text:
             summary = response.text
         elif response.parts:
@@ -121,8 +170,7 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
                 if hasattr(part, 'text'):
                     summary += part.text
         
-        if not summary: # If summary is still empty after trying common attributes
-            # st.warning(f"Gemini response object structure for debugging: {response}") # For debugging
+        if not summary: 
             return "Error: Could not extract text from Gemini response. The response might be empty or the API structure has changed."
             
         return summary.strip()
@@ -135,6 +183,7 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
 # --- Step 1: Fetch Financial Data (Multi-Year) & Stock Info (with curl_cffi) ---
 @st.cache_data(ttl=3600) 
 def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
+    # This function remains the same as in financial_toolkit_full_updated_v3
     st.write(f"Fetching {frequency.capitalize()} data for {ticker_symbol} from Yahoo Finance...")
     try:
         session = cffi_requests.Session()
@@ -180,6 +229,7 @@ def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
 
 # --- Step 2: Calculate Financial Ratios (Multi-Year) ---
 def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statement, stock_info_latest):
+    # This function remains the same as in financial_toolkit_full_updated_v3
     ratios_over_time = pd.DataFrame()
     if balance_sheet.empty or income_statement.empty:
         return ratios_over_time
@@ -286,6 +336,7 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
 
 # --- Step 3: Loan Scenario Modeling ---
 def simulate_loan_impact(latest_financial_data, loan_amount, interest_rate_decimal):
+    # This function remains the same as in financial_toolkit_full_updated_v3
     results = {'New Annual Interest': None, 'Pro-Forma Interest Expense': None,
                'Pro-Forma Interest Coverage Ratio': None, 'Acceptable Coverage (>1.25x)?': None}
     if not latest_financial_data: 
@@ -317,6 +368,7 @@ def simulate_loan_impact(latest_financial_data, loan_amount, interest_rate_decim
 
 # --- Step 4: Risk Scoring ---
 def assess_risk_from_ratios(latest_ratios_series):
+    # This function remains the same as in financial_toolkit_full_updated_v3
     score = 0
     thresholds = {'Current Ratio': 1.5, 'Debt-to-Equity': 2.0, 'Interest Coverage Ratio (EBIT/Int)': 3.0,
                   'Net Profit Margin': 0.05, 'EBITDA Margin': 0.10, 
@@ -343,23 +395,73 @@ def assess_risk_from_ratios(latest_ratios_series):
     summary_text = f"Score: {score}/{max_score}. Strengths: {', '.join(achieved) if achieved else 'None identified based on thresholds.'}"
     return risk_level, color, summary_text
 
-# --- Streamlit App UI ---
+# --- Streamlit App UI (MODIFIED for Search Enhancements) ---
 st.title("🏢 Financial Analysis Toolkit")
 st.caption("Comprehensive financial analysis using Yahoo Finance data. All monetary values are in the currency reported by Yahoo Finance (usually USD unless specified).")
 
-st.sidebar.header("Inputs")
-ticker = st.sidebar.text_input("Enter Stock Ticker:", "MSFT").upper()
+# --- Load Ticker Data ---
+ticker_master_list_df = load_ticker_data() # Load once
+
+# --- Inputs in Sidebar ---
+st.sidebar.header("Company Search & Inputs")
+
+# Main Ticker Input
+ticker_input_value = st.sidebar.text_input("Enter Stock Ticker (e.g., MSFT):", st.session_state.get("ticker_input", "MSFT")).upper()
+st.session_state.ticker_input = ticker_input_value # Store in session state for persistence
+
+# Ticker Suggestions
+if not ticker_master_list_df.empty and ticker_input_value and len(ticker_input_value) <= 4: # Show suggestions for short inputs
+    # Ensure 'Symbol' column exists before trying to use it
+    if 'Symbol' in ticker_master_list_df.columns:
+        suggestions = ticker_master_list_df[ticker_master_list_df['Symbol'].str.startswith(ticker_input_value, na=False)]
+        if not suggestions.empty:
+            st.sidebar.markdown("**Ticker Suggestions:**")
+            for _, row in suggestions.head(5).iterrows(): 
+                st.sidebar.caption(f"{row['Symbol']} - {row.get('Name', 'N/A')}") # Use .get for Name as it might be missing if CSV is malformed
+    else:
+        st.sidebar.caption("Ticker suggestion feature requires a 'Symbol' column in the ticker file.")
+            
+# Search by Company Name
+st.sidebar.markdown("---") # Separator
+company_name_search = st.sidebar.text_input("Or Search by Company Name (e.g., Apple):")
+
+if not ticker_master_list_df.empty and company_name_search:
+    # Ensure 'Name' and 'Symbol' columns exist
+    if 'Name' in ticker_master_list_df.columns and 'Symbol' in ticker_master_list_df.columns:
+        name_matches = ticker_master_list_df[
+            ticker_master_list_df['Name'].str.contains(company_name_search, case=False, na=False)
+        ]
+        if not name_matches.empty:
+            st.sidebar.markdown("**Matching Companies (Name Search):**")
+            for _, row in name_matches.head(10).iterrows(): 
+                st.sidebar.caption(f"{row['Symbol']}: {row['Name']}")
+        else:
+            st.sidebar.caption("No matches found for that company name.")
+    else:
+        st.sidebar.caption("Company name search requires 'Name' and 'Symbol' columns in the ticker file.")
+
+
+st.sidebar.markdown("---") # Separator
 frequency_options = {'Annual': 'annual', 'Quarterly': 'quarterly'}
-selected_frequency_label = st.sidebar.radio("Select Data Frequency:", list(frequency_options.keys()), index=0, key="data_frequency_radio")
+selected_frequency_label = st.sidebar.radio(
+    "Select Data Frequency:", 
+    list(frequency_options.keys()), 
+    index=0, 
+    key="data_frequency_radio"
+)
 frequency_value = frequency_options[selected_frequency_label]
+
 analyze_button = st.sidebar.button("🚀 Analyze Company")
 
-if analyze_button and ticker:
-    with st.spinner(f"Fetching and analyzing {ticker} ({selected_frequency_label})... This may take a moment."):
-        stock_info, bs_data, is_data, cf_data, stock_hist = fetch_financial_data_multi_year(ticker, frequency_value)
+# --- Main Analysis Area ---
+if analyze_button and ticker_input_value: 
+    ticker_to_analyze = ticker_input_value 
+    
+    with st.spinner(f"Fetching and analyzing {ticker_to_analyze} ({selected_frequency_label})... This may take a moment."):
+        stock_info, bs_data, is_data, cf_data, stock_hist = fetch_financial_data_multi_year(ticker_to_analyze, frequency_value)
 
     if stock_info and get_safe_value(stock_info, 'shortName'):
-        st.header(f"{get_safe_value(stock_info, 'shortName', ticker)} ({ticker}) - {selected_frequency_label} Data")
+        st.header(f"{get_safe_value(stock_info, 'shortName', ticker_to_analyze)} ({ticker_to_analyze}) - {selected_frequency_label} Data")
         
         ratios_df = pd.DataFrame()
         if bs_data is not None and is_data is not None and not bs_data.empty and not is_data.empty:
@@ -413,6 +515,7 @@ if analyze_button and ticker:
             col_d3.metric("Beta", format_value(get_safe_value(stock_info, 'beta'), 'ratio'))
             col_d4.metric("Shares Outstanding", format_value(get_safe_value(stock_info, 'sharesOutstanding'), 'number'))
 
+
         with created_tabs[tab_idx]: # Historical Financials
             tab_idx += 1
             st.subheader("Balance Sheet (Key Items)")
@@ -451,6 +554,7 @@ if analyze_button and ticker:
                             fig.update_layout(xaxis_title=f"{selected_frequency_label} Period Ending")
                             st.plotly_chart(fig, use_container_width=True)
             else: st.info("Ratio data not available for plotting.")
+
 
         if "🤖 AI Financial Summary" in tabs_list_names:
             with created_tabs[tab_idx]:
@@ -508,9 +612,11 @@ if analyze_button and ticker:
                 st.caption(risk_summary)
             else: st.info("Risk assessment requires calculated ratios. Check if data was fetched correctly.")
 
-    elif ticker and not (stock_info and get_safe_value(stock_info, 'shortName')):
-        st.error(f"Could not retrieve any valid data for the ticker: {ticker}. Please ensure it's a correct and active stock ticker, or try again later.")
-    elif not ticker and analyze_button: 
+
+    elif ticker_input_value and not (stock_info and get_safe_value(stock_info, 'shortName')): 
+        st.error(f"Could not retrieve any valid data for the ticker: {ticker_input_value}. Please ensure it's a correct and active stock ticker, or try again later.")
+    elif not ticker_input_value and analyze_button: 
         st.error("Please enter a stock ticker in the sidebar.")
-    elif not ticker: 
+    elif not ticker_input_value: 
         st.info("👋 Welcome! Please enter a stock ticker in the sidebar and click 'Analyze Company'.")
+
