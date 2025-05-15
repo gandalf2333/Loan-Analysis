@@ -49,7 +49,8 @@ def get_safe_value(data_structure, keys, default=None):
 # --- AI Summary Function (Google Gemini) ---
 def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
     """
-    Generates a financial health summary using Google's Gemini API.
+    Generates a financial health summary using Google's Gemini API,
+    with an improved prompt to reduce data mixing.
     """
     try:
         api_key = st.secrets.get("GOOGLE_API_KEY")
@@ -66,59 +67,71 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
         ratios_text_list = []
         if latest_ratios_series is not None and not latest_ratios_series.empty:
             for ratio_name, value in latest_ratios_series.dropna().items():
+                # Using your existing format_value logic for consistency
                 if "Margin" in ratio_name or "ROE" in ratio_name or "ROA" in ratio_name:
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'percent')}")
-                elif "EPS" in ratio_name:
+                elif "EPS" in ratio_name: 
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'currency_precise')}")
                 else: 
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'ratio')}")
-        ratios_as_text = "\n".join(ratios_text_list) if ratios_text_list else "No ratio data available."
+        ratios_as_text = "\n".join(ratios_text_list) if ratios_text_list else "No detailed financial ratio data was provided for this period."
 
+        # Revised Prompt Structure:
         prompt = f"""
         You are a concise financial analyst assistant.
-        Your task is to analyze the provided key metrics and financial ratios for {company_name}, which operates in the {sector} sector.
-        Based ONLY on the data presented below, provide a brief summary (around 150-200 words) of the company's financial health.
-        Highlight 2-3 key strengths and 2-3 potential areas for attention or weaknesses that are evident from these numbers.
-        
-        Strictly adhere to the following:
-        1. Do NOT provide any investment advice, buy/sell/hold recommendations, or future price predictions.
-        2. Do NOT make up or infer information not explicitly present in the provided data.
-        3. Focus your analysis solely on interpreting what these specific ratios and metrics indicate.
-        4. If crucial data for a typical assessment is missing (e.g., many ratios are N/A), acknowledge this limitation.
+        Your task is to analyze the provided data for {company_name} (Sector: {sector}).
 
-        Key Metrics from Stock Information:
+        Please analyze the following two distinct sections of data:
+
+        SECTION 1: GENERAL STOCK INFORMATION
+        --- Start of General Stock Information ---
         - Market Cap: {format_value(get_safe_value(stock_info_dict, 'marketCap'), 'currency')}
         - Trailing P/E: {format_value(get_safe_value(stock_info_dict, 'trailingPE'), 'ratio')}
         - Forward P/E: {format_value(get_safe_value(stock_info_dict, 'forwardPE'), 'ratio')}
         - Beta: {format_value(get_safe_value(stock_info_dict, 'beta'), 'ratio')}
-        
-        Latest Financial Ratios:
-        {ratios_as_text}
+        --- End of General Stock Information ---
 
+        SECTION 2: LATEST FINANCIAL RATIOS
+        --- Start of Latest Financial Ratios ---
+        {ratios_as_text}
+        --- End of Latest Financial Ratios ---
+
+        Instructions for your summary:
+        1.  First, provide a brief (1-2 sentences) interpretation of what the 'General Stock Information' (SECTION 1) suggests about the company's market valuation and perceived risk.
+        2.  Next, analyze the 'Latest Financial Ratios' (SECTION 2). Identify 2-3 key financial strengths and 2-3 potential areas for attention or weaknesses evident from these ratios. If ratio data is sparse or missing from SECTION 2, please state that clearly.
+        3.  Combine these analyses into a single, coherent summary of the company's overall financial health, approximately 150-200 words in total.
+        4.  Crucially, ensure that your discussion of EPS or other specific ratios from SECTION 2 uses ONLY the values provided in SECTION 2, and does not mix them with values from SECTION 1 (like Market Cap).
+        5.  Do NOT provide any investment advice, buy/sell/hold recommendations, or future price predictions.
+        6.  Base your analysis ONLY on the numerical data provided in the sections above. Do not infer or add external information.
+        
         Please provide your analytical summary:
         """
 
         generation_config = genai.types.GenerationConfig(
-            temperature=0.3,
-            max_output_tokens=350
+            temperature=0.2, # Slightly lower temperature for more focused output
+            max_output_tokens=350 
         )
         response = model.generate_content(prompt, generation_config=generation_config)
         
         summary = ""
-        if response.parts:
-            for part in response.parts:
-                summary += part.text
-        elif hasattr(response, 'text') and response.text:
+        # Robustly extract text from response
+        if hasattr(response, 'text') and response.text:
             summary = response.text
-        else: 
-            return "Error: Could not extract text from Gemini response. The response might be empty or the structure has changed."
+        elif response.parts:
+            for part in response.parts:
+                if hasattr(part, 'text'):
+                    summary += part.text
+        
+        if not summary: # If summary is still empty after trying common attributes
+            # st.warning(f"Gemini response object structure for debugging: {response}") # For debugging
+            return "Error: Could not extract text from Gemini response. The response might be empty or the API structure has changed."
+            
         return summary.strip()
 
     except Exception as e:
         st.error(f"An error occurred while generating AI summary with Gemini: {e}")
-        st.error(f"Traceback: {traceback.format_exc()}")
-        return "Error: Could not generate AI summary with Gemini. Check console for details."
-
+        st.error(f"Traceback: {traceback.format_exc()}") 
+        return "Error: Could not generate AI summary with Gemini. Check console for details.
 
 # --- Step 1: Fetch Financial Data (Multi-Year) & Stock Info (MODIFIED) ---
 @st.cache_data(ttl=3600) # Cache data for 1 hour
