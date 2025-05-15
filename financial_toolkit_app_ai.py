@@ -5,6 +5,7 @@ import yfinance as yf
 import plotly.express as px
 import google.generativeai as genai # For Google Gemini API
 import traceback # For more detailed error logging
+from curl_cffi import requests as cffi_requests # For custom user-agent with yfinance
 
 # --- Page Configuration ---
 st.set_page_config(layout="wide", page_title="Financial Analysis Toolkit")
@@ -56,11 +57,7 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
             return "Error: Google API key not found in Streamlit secrets. Please add `GOOGLE_API_KEY = \"YOUR_KEY\"` to `.streamlit/secrets.toml`."
 
         genai.configure(api_key=api_key)
-
-        # Model choice: 'gemini-1.5-flash-latest' is fast and cost-effective.
-        # 'gemini-1.0-pro-latest' (or 'gemini-pro') is also a good option.
-        # Verify availability for your API key.
-        model_name = 'gemini-1.5-flash-latest'
+        model_name = 'gemini-1.5-flash-latest' # Or 'gemini-1.0-pro-latest'
         model = genai.GenerativeModel(model_name)
 
         company_name = get_safe_value(stock_info_dict, 'shortName', 'the company')
@@ -71,9 +68,9 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
             for ratio_name, value in latest_ratios_series.dropna().items():
                 if "Margin" in ratio_name or "ROE" in ratio_name or "ROA" in ratio_name:
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'percent')}")
-                elif "EPS" in ratio_name: # EPS is usually a currency value
+                elif "EPS" in ratio_name:
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'currency_precise')}")
-                else: # Default to ratio format for other numerical ratios
+                else: 
                     ratios_text_list.append(f"- {ratio_name}: {format_value(value, 'ratio')}")
         ratios_as_text = "\n".join(ratios_text_list) if ratios_text_list else "No ratio data available."
 
@@ -103,9 +100,8 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
 
         generation_config = genai.types.GenerationConfig(
             temperature=0.3,
-            max_output_tokens=350 # Increased slightly for potentially more detailed summary
+            max_output_tokens=350
         )
-
         response = model.generate_content(prompt, generation_config=generation_config)
         
         summary = ""
@@ -116,28 +112,33 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
             summary = response.text
         else: 
             return "Error: Could not extract text from Gemini response. The response might be empty or the structure has changed."
-            
         return summary.strip()
 
     except Exception as e:
         st.error(f"An error occurred while generating AI summary with Gemini: {e}")
-        st.error(f"Traceback: {traceback.format_exc()}") # More detailed error for debugging
+        st.error(f"Traceback: {traceback.format_exc()}")
         return "Error: Could not generate AI summary with Gemini. Check console for details."
 
 
-# --- Step 1: Fetch Financial Data (Multi-Year) & Stock Info ---
+# --- Step 1: Fetch Financial Data (Multi-Year) & Stock Info (MODIFIED) ---
 @st.cache_data(ttl=3600) # Cache data for 1 hour
 def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
     st.write(f"Fetching {frequency.capitalize()} data for {ticker_symbol} from Yahoo Finance...")
     try:
-        stock = yf.Ticker(ticker_symbol)
-        stock_info = stock.info
+        # Create a session with a common browser user-agent
+        session = cffi_requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        })
+
+        stock = yf.Ticker(ticker_symbol, session=session) # Pass the session here
+        stock_info = stock.info # This is where the error occurred
 
         if not stock_info or stock_info.get('regularMarketPrice') is None:
-            st.error(f"Could not retrieve valid stock information for {ticker_symbol}. It might be delisted or an incorrect ticker.")
-            return None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None # Return empty DFs
+            st.error(f"Could not retrieve valid stock information for {ticker_symbol} after attempting with custom headers. It might be delisted or an incorrect ticker.")
+            return None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None
 
-        bs, is_, cf = pd.DataFrame(), pd.DataFrame(), pd.DataFrame() # Initialize as empty
+        bs, is_, cf = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
         if frequency == 'annual':
             bs = stock.balance_sheet
             is_ = stock.financials
@@ -156,8 +157,13 @@ def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
         hist = stock.history(period="4y")
         return stock_info, bs, is_, cf, hist
 
+    except cffi_requests.RequestsError as http_err: # Catching curl_cffi specific HTTP errors
+        st.error(f"❌ HTTP Error fetching data for {ticker_symbol}: {http_err}")
+        st.error(f"This often happens when Yahoo Finance blocks requests from cloud platforms. The custom user-agent trick may not always work.")
+        st.error(traceback.format_exc())
+        return None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None
     except Exception as e:
-        st.error(f"❌ Error fetching data for {ticker_symbol}: {e}")
+        st.error(f"❌ An unexpected error occurred while fetching data for {ticker_symbol}: {e}")
         st.error(traceback.format_exc())
         return None, pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None
 
@@ -173,7 +179,7 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
     if common_periods.empty:
         return ratios_over_time
     if isinstance(common_periods, pd.DatetimeIndex):
-        common_periods = common_periods.sort_values(ascending=True) # Oldest to newest for processing
+        common_periods = common_periods.sort_values(ascending=True) 
 
     for period in common_periods:
         ratios = {}
@@ -196,7 +202,7 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
         calculated_total_debt = (long_term_debt if pd.notna(long_term_debt) else 0) + \
                                 (short_term_debt if pd.notna(short_term_debt) else 0)
         total_debt = extracted_total_debt if pd.notna(extracted_total_debt) and extracted_total_debt != 0 else calculated_total_debt
-        if total_debt == 0 and pd.notna(extracted_total_debt): # Ensure extracted_total_debt is used if calculated is 0 but extracted exists
+        if total_debt == 0 and pd.notna(extracted_total_debt):
             total_debt = extracted_total_debt
 
         ebit = get_safe_value(is_period, ['Operating Income', 'Ebit', 'Earnings Before Interest And Taxes'])
@@ -208,7 +214,7 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
         cogs = get_safe_value(is_period, ['Cost Of Revenue', 'Cost of Goods Sold'])
         
         ebitda = get_safe_value(is_period, ['EBITDA', 'Normalized EBITDA'])
-        if pd.isna(ebitda): # Check if ebitda is NaN
+        if pd.isna(ebitda): 
             depreciation_amortization_is = get_safe_value(is_period, ['Depreciation And Amortization', 'Depreciation & Amortization'])
             depreciation_amortization_cf = get_safe_value(cf_period, ['Depreciation And Amortization', 'Depreciation'])
             depreciation = depreciation_amortization_is if pd.notna(depreciation_amortization_is) else depreciation_amortization_cf
@@ -224,7 +230,6 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
         cap_ex_val = get_safe_value(cf_period, ['Capital Expenditures', 'Capital Expenditure'])
         cap_ex = abs(cap_ex_val) if pd.notna(cap_ex_val) else None
 
-        # Calculate Ratios (with pd.notna checks for all inputs)
         if pd.notna(current_assets) and pd.notna(current_liabilities) and current_liabilities != 0:
             ratios['Current Ratio'] = current_assets / current_liabilities
         if pd.notna(cash_equivalents) and pd.notna(current_liabilities) and current_liabilities != 0:
@@ -233,7 +238,7 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
             ratios['Quick Ratio (Excl. Inventory)'] = (current_assets - inventory) / current_liabilities
         if pd.notna(total_debt) and pd.notna(shareholder_equity) and shareholder_equity != 0:
             ratios['Debt-to-Equity'] = total_debt / shareholder_equity
-        if pd.notna(total_liabilities_val) and pd.notna(total_assets) and total_assets != 0: # Use total_liabilities_val
+        if pd.notna(total_liabilities_val) and pd.notna(total_assets) and total_assets != 0: 
             ratios['Debt-to-Assets'] = total_liabilities_val / total_assets
         if pd.notna(total_assets) and pd.notna(shareholder_equity) and shareholder_equity != 0:
              ratios['Financial Leverage (Assets/Equity)'] = total_assets / shareholder_equity
@@ -266,19 +271,19 @@ def calculate_ratios_multi_year(balance_sheet, income_statement, cashflow_statem
         
         period_label = period.strftime('%Y-%m-%d') if isinstance(period, pd.Timestamp) else str(period)
         ratios_over_time[period_label] = pd.Series(ratios)
-    return ratios_over_time.sort_index(axis=1, ascending=False) # Latest first
+    return ratios_over_time.sort_index(axis=1, ascending=False)
 
 # --- Step 3: Loan Scenario Modeling ---
 def simulate_loan_impact(latest_financial_data, loan_amount, interest_rate_decimal):
     results = {'New Annual Interest': None, 'Pro-Forma Interest Expense': None,
                'Pro-Forma Interest Coverage Ratio': None, 'Acceptable Coverage (>1.25x)?': None}
-    if not latest_financial_data: # Check if the dictionary is empty
+    if not latest_financial_data: 
         st.warning("Loan simulation: essential financial data (EBIT, Interest Expense) missing.")
         return results
     ebit = get_safe_value(latest_financial_data, 'EBIT')
-    current_interest_expense = get_safe_value(latest_financial_data, 'Interest Expense', default=0.0) # Default to 0.0 if missing
+    current_interest_expense = get_safe_value(latest_financial_data, 'Interest Expense', default=0.0)
 
-    if pd.notna(ebit) and pd.notna(current_interest_expense): # Ensure current_interest_expense is also checked for NaN
+    if pd.notna(ebit) and pd.notna(current_interest_expense):
         annual_interest_increase = loan_amount * interest_rate_decimal
         new_total_interest_expense = current_interest_expense + annual_interest_increase
         results['New Annual Interest'] = annual_interest_increase
@@ -294,9 +299,9 @@ def simulate_loan_impact(latest_financial_data, loan_amount, interest_rate_decim
             elif ebit < 0:
                 results['Pro-Forma Interest Coverage Ratio'] = float('-inf')
                 results['Acceptable Coverage (>1.25x)?'] = False
-            else: # EBIT is 0
-                results['Pro-Forma Interest Coverage Ratio'] = 0.0 # Or some other representation for 0/0
-                results['Acceptable Coverage (>1.25x)?'] = False # Typically 0 coverage is not acceptable
+            else: 
+                results['Pro-Forma Interest Coverage Ratio'] = 0.0 
+                results['Acceptable Coverage (>1.25x)?'] = False 
     return results
 
 # --- Step 4: Risk Scoring ---
@@ -304,7 +309,7 @@ def assess_risk_from_ratios(latest_ratios_series):
     score = 0
     thresholds = {'Current Ratio': 1.5, 'Debt-to-Equity': 2.0, 'Interest Coverage Ratio (EBIT/Int)': 3.0,
                   'Net Profit Margin': 0.05, 'EBITDA Margin': 0.10, 
-                  'Quick Ratio (Excl. Inventory)': 1.0, # Make sure this key matches what's in ratios_df
+                  'Quick Ratio (Excl. Inventory)': 1.0, 
                   'ROA (Return on Assets)': 0.05}
     achieved, max_score = [], len(thresholds)
     if latest_ratios_series is None or latest_ratios_series.empty: 
@@ -312,14 +317,14 @@ def assess_risk_from_ratios(latest_ratios_series):
 
     def check_ratio(name, threshold, is_greater_better=True):
         nonlocal score
-        val = get_safe_value(latest_ratios_series, name) # Use get_safe_value
+        val = get_safe_value(latest_ratios_series, name)
         if pd.notnull(val):
             formatted_val_display = f"{val:.2f}"
             if (is_greater_better and val >= threshold) or (not is_greater_better and val <= threshold):
                 score += 1; achieved.append(f"{('Good' if is_greater_better else 'Manageable')} {name} ({formatted_val_display})")
     
     for name, thresh in thresholds.items():
-        check_ratio(name, thresh, is_greater_better=(name != 'Debt-to-Equity')) # Debt-to-Equity is lower is better
+        check_ratio(name, thresh, is_greater_better=(name != 'Debt-to-Equity'))
     
     if score >= max_score * 0.7: risk_level, color = 'Low Risk', 'green'
     elif score >= max_score * 0.4: risk_level, color = 'Medium Risk', 'orange'
@@ -331,7 +336,6 @@ def assess_risk_from_ratios(latest_ratios_series):
 st.title("🏢 Financial Analysis Toolkit")
 st.caption("Comprehensive financial analysis using Yahoo Finance data. All monetary values are in the currency reported by Yahoo Finance (usually USD unless specified).")
 
-# --- Inputs in Sidebar ---
 st.sidebar.header("Inputs")
 ticker = st.sidebar.text_input("Enter Stock Ticker:", "MSFT").upper()
 frequency_options = {'Annual': 'annual', 'Quarterly': 'quarterly'}
@@ -339,7 +343,6 @@ selected_frequency_label = st.sidebar.radio("Select Data Frequency:", list(frequ
 frequency_value = frequency_options[selected_frequency_label]
 analyze_button = st.sidebar.button("🚀 Analyze Company")
 
-# --- Main Analysis Area ---
 if analyze_button and ticker:
     with st.spinner(f"Fetching and analyzing {ticker} ({selected_frequency_label})... This may take a moment."):
         stock_info, bs_data, is_data, cf_data, stock_hist = fetch_financial_data_multi_year(ticker, frequency_value)
@@ -347,22 +350,20 @@ if analyze_button and ticker:
     if stock_info and get_safe_value(stock_info, 'shortName'):
         st.header(f"{get_safe_value(stock_info, 'shortName', ticker)} ({ticker}) - {selected_frequency_label} Data")
         
-        ratios_df = pd.DataFrame() # Initialize
-        if bs_data is not None and is_data is not None and not bs_data.empty and not is_data.empty: # Check for None as well
+        ratios_df = pd.DataFrame()
+        if bs_data is not None and is_data is not None and not bs_data.empty and not is_data.empty:
              with st.spinner("Calculating financial ratios..."):
                 ratios_df = calculate_ratios_multi_year(bs_data, is_data, cf_data, stock_info)
         
         tabs_list_names = ["🔑 Key Metrics & Stock Info", "📜 Historical Financials", "📊 Financial Ratios (YoY)"]
-        if ratios_df is not None and not ratios_df.empty: # Check for None
+        if ratios_df is not None and not ratios_df.empty:
             tabs_list_names.append("🤖 AI Financial Summary")
         tabs_list_names.append("💸 Loan Impact & Risk")
         
         created_tabs = st.tabs(tabs_list_names)
-        
-        tab_idx = 0 # To keep track of tab index for dynamic tab creation
+        tab_idx = 0 
 
-        # --- Tab 1: Key Metrics & Stock Info ---
-        with created_tabs[tab_idx]:
+        with created_tabs[tab_idx]: # Key Metrics & Stock Info
             tab_idx += 1
             st.subheader("Company Overview")
             col1, col2, col3 = st.columns(3)
@@ -395,16 +396,13 @@ if analyze_button and ticker:
 
             col_d1, col_d2, col_d3, col_d4 = st.columns(4)
             raw_div_yield = get_safe_value(stock_info, 'dividendYield')
-            # If dividendYield from yfinance is like 0.74 for 0.74%, format directly.
             formatted_div_yield_display = f"{raw_div_yield:.2f}%" if pd.notna(raw_div_yield) else "N/A"
             col_d1.metric("Dividend Yield", formatted_div_yield_display)
-            # If payoutRatio from yfinance is like 0.24 for 24%, use 'percent' formatter.
             col_d2.metric("Payout Ratio", format_value(get_safe_value(stock_info, 'payoutRatio'), 'percent'))
             col_d3.metric("Beta", format_value(get_safe_value(stock_info, 'beta'), 'ratio'))
             col_d4.metric("Shares Outstanding", format_value(get_safe_value(stock_info, 'sharesOutstanding'), 'number'))
 
-        # --- Tab 2: Historical Financials ---
-        with created_tabs[tab_idx]:
+        with created_tabs[tab_idx]: # Historical Financials
             tab_idx += 1
             st.subheader("Balance Sheet (Key Items)")
             if bs_data is not None and not bs_data.empty:
@@ -419,37 +417,30 @@ if analyze_button and ticker:
                 st.dataframe(cf_data.head(20).style.format(lambda x: format_value(x, 'currency', 'N/A') if isinstance(x, (int, float)) else str(x), na_rep="N/A"))
             else: st.info("Cash Flow Statement data not available.")
         
-        # --- Tab 3: Financial Ratios (YoY) ---
-        with created_tabs[tab_idx]:
+        with created_tabs[tab_idx]: # Financial Ratios (YoY)
             tab_idx += 1
             st.subheader("Key Financial Ratios Over Time")
             if ratios_df is not None and not ratios_df.empty:
-                st.dataframe(ratios_df.style.format("{:.2f}", na_rep="N/A")) # Display ratios with 2 decimal places
+                st.dataframe(ratios_df.style.format("{:.2f}", na_rep="N/A"))
                 st.subheader("Ratio Trends")
-                default_ratios_to_plot = ['Current Ratio', 'Debt-to-Equity', 'Net Profit Margin', 'ROE (Return on Equity)', 'EPS (Diluted)']
-                available_ratios_for_plot = [r for r in default_ratios_to_plot if r in ratios_df.index]
-                
-                selected_ratios_for_plot = st.multiselect(
-                    "Select ratios to plot:", options=list(ratios_df.index), default=available_ratios_for_plot, key="ratio_plot_multiselect"
-                )
-                if selected_ratios_for_plot:
-                    plot_df = ratios_df.loc[selected_ratios_for_plot].T.reset_index().rename(columns={'index': 'Period'})
+                default_ratios = ['Current Ratio', 'Debt-to-Equity', 'Net Profit Margin', 'ROE (Return on Equity)', 'EPS (Diluted)']
+                available_ratios = [r for r in default_ratios if r in ratios_df.index]
+                selected_ratios = st.multiselect("Select ratios to plot:", options=list(ratios_df.index), default=available_ratios, key="ratio_plot_multiselect")
+                if selected_ratios:
+                    plot_df = ratios_df.loc[selected_ratios].T.reset_index().rename(columns={'index': 'Period'})
                     try:
                         plot_df['Period'] = pd.to_datetime(plot_df['Period'])
                         plot_df = plot_df.sort_values(by='Period')
                     except Exception: st.warning("Could not parse period dates for optimal chart sorting.")
-
-                    for ratio_name_plot in selected_ratios_for_plot: # Renamed to avoid conflict
+                    for ratio_name_plot in selected_ratios:
                         if ratio_name_plot in plot_df.columns:
                             fig = px.line(plot_df, x='Period', y=ratio_name_plot, title=f'{ratio_name_plot} Trend', markers=True)
-                            # Heuristic for identifying percentage-based ratios for y-axis formatting
                             if any(p_term in ratio_name_plot for p_term in ["Margin", "ROE", "ROA", "Yield"]) and "EPS" not in ratio_name_plot :
                                 fig.update_layout(yaxis_tickformat='.2%') 
                             fig.update_layout(xaxis_title=f"{selected_frequency_label} Period Ending")
                             st.plotly_chart(fig, use_container_width=True)
             else: st.info("Ratio data not available for plotting.")
 
-        # --- AI Financial Summary Tab (conditionally added) ---
         if "🤖 AI Financial Summary" in tabs_list_names:
             with created_tabs[tab_idx]:
                 tab_idx += 1
@@ -461,32 +452,28 @@ if analyze_button and ticker:
                 AI models can make mistakes or misinterpret data.
                 """)
                 if ratios_df is not None and not ratios_df.empty:
-                    latest_ratios = ratios_df[ratios_df.columns[0]] # Get the most recent column of ratios
+                    latest_ratios = ratios_df[ratios_df.columns[0]]
                     with st.spinner("🧠 Generating AI summary with Gemini... please wait."):
                         ai_summary = generate_ai_summary_gemini(stock_info, latest_ratios)
                         st.markdown(ai_summary)
                 else: st.info("Financial ratios needed to generate AI summary. Check if data was fetched correctly.")
         
-        # --- Loan Impact & Risk Tab ---
-        with created_tabs[tab_idx]:
+        with created_tabs[tab_idx]: # Loan Impact & Risk
             st.subheader("Loan Impact Simulation (Based on Latest Data)")
-            # Sidebar inputs for loan are now defined with keys, so they persist across reruns if sidebar is always rendered
-            st.sidebar.subheader("Loan Scenario Details") # Unique header for this section
+            st.sidebar.subheader("Loan Scenario Details") 
             loan_amount = st.sidebar.number_input("Loan Amount ($):", min_value=0, value=100000, step=10000, key="loan_amount_sidebar_input")
             interest_rate_perc = st.sidebar.slider("Annual Interest Rate (%):", 0.0, 25.0, 7.0, 0.1, key="interest_rate_sidebar_slider")
             interest_rate_dec = interest_rate_perc / 100.0
 
             loan_sim_inputs = {}
-            # Ensure is_data is a DataFrame and has columns before trying to access them
-            if isinstance(is_data, pd.DataFrame) and not is_data.empty and len(is_data.columns) > 0:
-                latest_is_col_name = is_data.columns[0] # yfinance usually sorts latest financial data period first
+            if isinstance(is_data, pd.DataFrame) and not is_data.empty and len(is_data.columns) > 0: # Corrected check
+                latest_is_col_name = is_data.columns[0]
                 is_latest_period_data = is_data[latest_is_col_name]
                 loan_sim_inputs['EBIT'] = get_safe_value(is_latest_period_data, ['Operating Income', 'Ebit', 'Earnings Before Interest And Taxes'])
                 interest_val = get_safe_value(is_latest_period_data, ['Interest Expense'])
-                loan_sim_inputs['Interest Expense'] = abs(interest_val) if pd.notna(interest_val) else 0.0 # Default to 0 if missing
+                loan_sim_inputs['Interest Expense'] = abs(interest_val) if pd.notna(interest_val) else 0.0
             else:
                 st.warning("Income statement data for the latest period is unavailable for loan simulation.")
-
 
             if loan_amount > 0 and pd.notna(get_safe_value(loan_sim_inputs, 'EBIT')):
                 loan_results = simulate_loan_impact(loan_sim_inputs, loan_amount, interest_rate_dec)
@@ -512,7 +499,7 @@ if analyze_button and ticker:
 
     elif ticker and not (stock_info and get_safe_value(stock_info, 'shortName')):
         st.error(f"Could not retrieve any valid data for the ticker: {ticker}. Please ensure it's a correct and active stock ticker, or try again later.")
-    elif not ticker and analyze_button: # If button clicked but no ticker
+    elif not ticker and analyze_button: 
         st.error("Please enter a stock ticker in the sidebar.")
-    elif not ticker: # Initial state, no button click yet
+    elif not ticker: 
         st.info("👋 Welcome! Please enter a stock ticker in the sidebar and click 'Analyze Company'.")
