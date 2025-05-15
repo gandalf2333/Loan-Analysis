@@ -2,7 +2,7 @@
 
 streamlit==1.45.0
 pandas==2.2.3
-yfinance==0.2.58
+yfinance==0.2.61
 numpy==2.2.5        # Often needed by pandas/yfinance
 lxml==5.4.0          # Often needed by yfinance/pandas for data parsing
 beautifulsoup4==4.13.4 # Often needed by yfinance for data scraping
