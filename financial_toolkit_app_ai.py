@@ -16,17 +16,16 @@ def format_value(value, format_type="currency", na_rep="N/A"):
     if pd.isna(value):
         return na_rep
     if format_type == "currency":
-        return f"${value:,.0f}" # For general currency with no decimals
-    if format_type == "currency_precise": # Added for things like EPS and stock prices
+        return f"${value:,.0f}" 
+    if format_type == "currency_precise": 
         return f"${value:,.2f}"
     if format_type == "ratio":
         return f"{value:.2f}"
     if format_type == "percent":
-        # Expects a decimal fraction (e.g., 0.25 for 25%), multiplies by 100
         return f"{value:.2%}"
     if format_type == "number":
         return f"{value:,.0f}"
-    return str(value) # Ensure it's a string if no format matches
+    return str(value) 
 
 def get_safe_value(data_structure, keys, default=None):
     """
@@ -34,7 +33,7 @@ def get_safe_value(data_structure, keys, default=None):
     `keys` can be a single key string or a list of potential keys to try.
     """
     if not isinstance(keys, list):
-        keys = [keys] # Convert single key to list
+        keys = [keys] 
 
     if isinstance(data_structure, pd.Series):
         for key in keys:
@@ -46,7 +45,7 @@ def get_safe_value(data_structure, keys, default=None):
                 return data_structure[key]
     return default
 
-# --- AI Summary Function (Google Gemini) ---
+# --- AI Summary Function (Google Gemini - Updated from gemini_summary_prompt_fix) ---
 def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
     """
     Generates a financial health summary using Google's Gemini API,
@@ -131,21 +130,20 @@ def generate_ai_summary_gemini(stock_info_dict, latest_ratios_series):
     except Exception as e:
         st.error(f"An error occurred while generating AI summary with Gemini: {e}")
         st.error(f"Traceback: {traceback.format_exc()}") 
-        return "Error: Could not generate AI summary with Gemini. Check console for details.
+        return "Error: Could not generate AI summary with Gemini. Check console for details."
 
-# --- Step 1: Fetch Financial Data (Multi-Year) & Stock Info (MODIFIED) ---
-@st.cache_data(ttl=3600) # Cache data for 1 hour
+# --- Step 1: Fetch Financial Data (Multi-Year) & Stock Info (with curl_cffi) ---
+@st.cache_data(ttl=3600) 
 def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
     st.write(f"Fetching {frequency.capitalize()} data for {ticker_symbol} from Yahoo Finance...")
     try:
-        # Create a session with a common browser user-agent
         session = cffi_requests.Session()
         session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
 
-        stock = yf.Ticker(ticker_symbol, session=session) # Pass the session here
-        stock_info = stock.info # This is where the error occurred
+        stock = yf.Ticker(ticker_symbol, session=session) 
+        stock_info = stock.info 
 
         if not stock_info or stock_info.get('regularMarketPrice') is None:
             st.error(f"Could not retrieve valid stock information for {ticker_symbol} after attempting with custom headers. It might be delisted or an incorrect ticker.")
@@ -162,7 +160,7 @@ def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
             cf = stock.quarterly_cashflow
         else:
             st.error("Invalid frequency specified.")
-            return stock_info, bs, is_, cf, None # Return info even if freq is bad
+            return stock_info, bs, is_, cf, None 
 
         if bs.empty and is_.empty and cf.empty:
             st.warning(f"No {frequency} financial statement data found for {ticker_symbol} on Yahoo Finance.")
@@ -170,7 +168,7 @@ def fetch_financial_data_multi_year(ticker_symbol, frequency='annual'):
         hist = stock.history(period="4y")
         return stock_info, bs, is_, cf, hist
 
-    except cffi_requests.RequestsError as http_err: # Catching curl_cffi specific HTTP errors
+    except cffi_requests.RequestsError as http_err: 
         st.error(f"❌ HTTP Error fetching data for {ticker_symbol}: {http_err}")
         st.error(f"This often happens when Yahoo Finance blocks requests from cloud platforms. The custom user-agent trick may not always work.")
         st.error(traceback.format_exc())
@@ -479,7 +477,7 @@ if analyze_button and ticker:
             interest_rate_dec = interest_rate_perc / 100.0
 
             loan_sim_inputs = {}
-            if isinstance(is_data, pd.DataFrame) and not is_data.empty and len(is_data.columns) > 0: # Corrected check
+            if isinstance(is_data, pd.DataFrame) and not is_data.empty and len(is_data.columns) > 0:
                 latest_is_col_name = is_data.columns[0]
                 is_latest_period_data = is_data[latest_is_col_name]
                 loan_sim_inputs['EBIT'] = get_safe_value(is_latest_period_data, ['Operating Income', 'Ebit', 'Earnings Before Interest And Taxes'])
